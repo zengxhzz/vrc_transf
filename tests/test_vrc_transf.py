@@ -45,8 +45,14 @@ class QwenTests(unittest.TestCase):
         self.assertEqual(session["output_modalities"], ["text"])
         self.assertEqual(session["translation"], {"language": "ja"})
         self.assertEqual(session["audio"]["input"]["format"], {"type": "pcm", "sample_rate": 16000})
+        self.assertEqual(session["audio"]["input"]["turn_detection"],
+                         {"type": "server_vad", "silence_duration_ms": 350})
         with self.assertRaises(ValueError):
             QwenSettings(api_key="test", workspace="example.org/path", region="cn-beijing")
+
+    def test_fast_turns_can_be_disabled_to_keep_provider_speaker_detection(self):
+        settings = QwenSettings("test", "", "qianwen-cn", fast_turns=False)
+        self.assertNotIn("turn_detection", settings.session_update("zh")["session"]["audio"]["input"])
 
     def test_audio_frames_are_base64_encoded_without_reinterpretation(self):
         event = json.loads(audio_event(b"\x01\x00\xff\xff"))
@@ -75,6 +81,69 @@ class OscTests(unittest.TestCase):
                 self.assertFalse(sender.tick(10.1))
                 self.assertTrue(sender.tick(12.0))
                 self.assertEqual(receiver.recv(1024), chatbox_packet("second"))
+
+    def test_queued_finals_share_the_next_slot_without_delaying_the_first(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+            receiver.bind(("127.0.0.1", 0))
+            receiver.settimeout(0.5)
+            with ChatboxSender(receiver.getsockname()[1]) as sender:
+                sender.enqueue("房间号是14。", mergeable=True)
+                self.assertTrue(sender.tick(10))
+                self.assertEqual(receiver.recv(1024), chatbox_packet("房间号是14。"))
+                for line in ("等等。", "我说错了。", "是40。", "不是14。"):
+                    sender.enqueue(line, mergeable=True)
+                self.assertFalse(sender.tick(11.59))
+                self.assertTrue(sender.tick(11.6))
+                self.assertEqual(receiver.recv(1024), chatbox_packet("等等。 我说错了。 是40。 不是14。"))
+                self.assertFalse(sender.tick(15))
+
+    def test_merge_respects_utf16_capacity_and_standalone_messages(self):
+        almost_full = "🌏" * 71
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+            receiver.bind(("127.0.0.1", 0))
+            receiver.settimeout(0.5)
+            with ChatboxSender(receiver.getsockname()[1]) as sender:
+                for text in (almost_full, "末", "尾"):
+                    sender.enqueue(text, mergeable=True)
+                sender.enqueue("OSC test")
+                for now, expected in enumerate((almost_full + " 末", "尾", "OSC test")):
+                    self.assertTrue(sender.tick(now * 2))
+                    self.assertEqual(receiver.recv(1024), chatbox_packet(expected))
+
+    def test_pending_text_is_never_merged_across_sessions_or_with_test_messages(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+            receiver.bind(("127.0.0.1", 0))
+            receiver.settimeout(0.5)
+            with ChatboxSender(receiver.getsockname()[1]) as sender:
+                sender.enqueue("上一场", mergeable=True)
+                sender.finish_session()
+                sender.enqueue("下一场", mergeable=True)
+                self.assertTrue(sender.tick(0))
+                self.assertEqual(receiver.recv(1024), chatbox_packet("上一场"))
+                sender.enqueue("OSC test")
+                sender.enqueue("继续", mergeable=True)
+                for i, expected in enumerate(("下一场", "OSC test", "继续"), 1):
+                    self.assertTrue(sender.tick(i * 2))
+                    self.assertEqual(receiver.recv(1024), chatbox_packet(expected))
+
+    def test_early_batch_does_not_delay_a_later_sentence_past_its_original_slot(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+            receiver.bind(("127.0.0.1", 0))
+            receiver.settimeout(0.5)
+            with ChatboxSender(receiver.getsockname()[1]) as sender:
+                sender.enqueue("开头", mergeable=True)
+                sender.tick(0)
+                receiver.recv(1024)
+                for text in ("一句", "两句"):
+                    sender.enqueue(text, mergeable=True)
+                sender.tick(1.61)
+                self.assertEqual(receiver.recv(1024), chatbox_packet("一句 两句"))
+                self.assertFalse(sender.tick(3.22))
+                sender.enqueue("新指令", mergeable=True)
+                sender.tick(3.6)
+                sender.enqueue("等我", mergeable=True)
+                self.assertTrue(sender.tick(4.83))
+                self.assertEqual(receiver.recv(1024), chatbox_packet("新指令 等我"))
 
 
 class AudioTests(unittest.TestCase):

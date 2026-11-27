@@ -35,6 +35,7 @@ class QwenSettings:
     api_key: str = field(repr=False)
     workspace: str
     region: str
+    fast_turns: bool = True
 
     def __post_init__(self):
         if not self.api_key.strip():
@@ -54,12 +55,15 @@ class QwenSettings:
         return f"wss://{host}/api-ws/v1/realtime?model={MODEL}"
 
     def session_update(self, target: str) -> dict:
+        audio_input = {"format": {"type": "pcm", "sample_rate": SAMPLE_RATE}}
+        if self.fast_turns:
+            audio_input["turn_detection"] = {"type": "server_vad", "silence_duration_ms": 350}
         return {
             "type": "session.update",
             "session": {
                 "input_modalities": ["audio"],
                 "output_modalities": ["text"],
-                "audio": {"input": {"format": {"type": "pcm", "sample_rate": SAMPLE_RATE}}},
+                "audio": {"input": audio_input},
                 "translation": {"language": target},
             },
         }

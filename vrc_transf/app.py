@@ -1,4 +1,5 @@
 import os
+import sys
 import tkinter as tk
 from collections import deque
 from functools import partial
@@ -7,15 +8,19 @@ from threading import Event, Thread
 from tkinter import ttk
 
 from .audio import AudioSource, capture_device, capture_process, scan_devices, supports_process_capture, vrchat_pid
+from .fullscreen import foreground_window, fullscreen_game_screen
 from .osc import ChatboxSender
 from .translation import QIANWEN_CN, DemoTranslator, QwenSettings, QwenTranslator, TranslationEvent, Translator
 
-BACKGROUND = "#f4f6fa"
-PANEL = "#ffffff"
-BORDER = "#dee4ef"
-TEXT = "#182237"
-MUTED = "#59677e"
-ACCENT = "#3159d3"
+BACKGROUND = "#f8f8f3"
+PANEL = BACKGROUND
+BORDER = "#d8dcd3"
+TEXT = "#202b25"
+MUTED = "#606b62"
+ACCENT = "#245f47"
+TINT = "#e4ece4"
+MINI_BG = "#18271f"
+MINI_MUTED = "#b6c9ba"
 ERROR = "#a92731"
 GAME_PROCESS = "VRChat 进程"
 QWEN = "Qwen3.8 LiveTranslate"
@@ -32,22 +37,26 @@ FONT = "Microsoft YaHei UI"
 
 class CaptionPanel:
     def __init__(self, parent, title: str):
-        self.frame = ttk.Frame(parent, padding=(18, 16), style="Panel.TFrame")
+        self.frame = ttk.Frame(parent)
         self.frame.columnconfigure(0, weight=1)
-        self.frame.rowconfigure(2, weight=1)
-        ttk.Label(self.frame, text=title, style="PanelTitle.TLabel").grid(row=0, sticky="w")
+        self.frame.rowconfigure(3, weight=1)
+        self.direction = ttk.Label(self.frame, text=title, style="PanelTitle.TLabel")
+        self.direction.grid(row=0, sticky="w")
+        self.route = ttk.Label(self.frame, style="Route.TLabel")
+        self.route.grid(row=1, sticky="w", pady=(3, 0))
         self.status = ttk.Label(self.frame, style="PanelMuted.TLabel")
-        self.status.grid(row=1, sticky="ew", pady=(3, 0))
+        self.status.grid(row=2, sticky="ew", pady=(4, 0))
         self.status.grid_remove()
         self.status.bind("<Configure>", lambda event: self.status.configure(wraplength=event.width))
         self.output = tk.Text(
-            self.frame, font=(FONT, 13), background=PANEL, foreground=TEXT,
+            self.frame, font=(FONT, 16), background=PANEL, foreground=TEXT,
             relief="flat", borderwidth=0, wrap="word",
             width=1, height=1, spacing2=3, spacing3=6,
-            selectbackground="#dce6ff", selectforeground=TEXT,
+            selectbackground=TINT, selectforeground=TEXT,
             highlightthickness=0, state="disabled",
         )
-        self.output.grid(row=2, sticky="nsew", pady=(14, 0))
+        self.output.grid(row=3, sticky="nsew", pady=(22, 0))
+        self.output.tag_configure("previous", foreground=MUTED, font=(FONT, 13))
         self.output.tag_configure("pending", foreground=ACCENT)
         self.output.tag_configure("empty", foreground=MUTED, font=(FONT, 11))
         self.history: deque[str] = deque(maxlen=100)
@@ -64,8 +73,9 @@ class CaptionPanel:
     def render(self):
         self.output.configure(state="normal")
         self.output.delete("1.0", "end")
-        if self.history:
-            self.output.insert("end", "\n\n".join(self.history) + "\n\n")
+        for index, line in enumerate(self.history):
+            previous = index < len(self.history) - 1 or bool(self.pending)
+            self.output.insert("end", line + ("\n\n" if previous else ""), "previous" if previous else ())
         if self.pending:
             self.output.insert("end", self.pending, "pending")
         elif not self.history:
@@ -91,92 +101,239 @@ class App:
         self.microphones = {}
         self.outputs = {}
         self.backend = tk.StringVar(value=QWEN)
+        self.fast_turns = tk.BooleanVar(value=True)
         self.key = tk.StringVar(value=os.environ.get("DASHSCOPE_API_KEY", ""))
         self.workspace = tk.StringVar(value=os.environ.get("DASHSCOPE_WORKSPACE_ID", ""))
         self.region = tk.StringVar(value=next(iter(REGIONS)))
         self.game_source = tk.StringVar()
         self.mic_source = tk.StringVar()
-        self.game_language = tk.StringVar(value="简体中文")
-        self.mic_language = tk.StringVar(value="English")
+        self.game_language = tk.StringVar(value="日本語")
+        self.mic_language = tk.StringVar(value="简体中文")
         self.game_enabled = tk.BooleanVar(value=True)
         self.mic_enabled = tk.BooleanVar(value=True)
         self.send_enabled = tk.BooleanVar(value=True)
         self.notice = tk.StringVar(value="就绪")
         self.settings_notice = tk.StringVar()
+        self.follow_fullscreen = tk.BooleanVar(value=True)
+        self.auto_game = None
+        self.dismissed_game = None
+        self.previous_main_state = "normal"
         self.controls: list[tuple[ttk.Widget, str]] = []
         self._build()
+        self._build_mini()
         self._build_settings()
         self.refresh_devices()
         self.sync_controls()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.poll_task = self.root.after(40, self.poll)
+        self.fullscreen_task = self.root.after(600, self._watch_fullscreen)
 
     def _build(self):
         self.root.title("VRC Transf · VRChat 实时翻译")
-        self.root.geometry("820x480")
+        self.root.geometry("860x460")
         self.root.minsize(620, 340)
         self.root.configure(background=BACKGROUND)
         style = ttk.Style(self.root)
         style.theme_use("clam")
         style.configure(".", font=(FONT, 10), background=BACKGROUND, foreground=TEXT,
                         bordercolor=BORDER, lightcolor=PANEL, darkcolor=PANEL, focuscolor=ACCENT)
-        style.configure("Title.TLabel", font=(FONT, 20, "bold"))
+        style.configure("Title.TLabel", font=("Segoe UI", 18, "bold"))
         style.configure("DialogTitle.TLabel", font=(FONT, 17, "bold"))
         style.configure("Muted.TLabel", foreground=MUTED)
-        style.configure("Panel.TFrame", background=PANEL, borderwidth=1, relief="solid")
-        style.configure("PanelTitle.TLabel", background=PANEL, font=(FONT, 12, "bold"))
+        style.configure("PanelTitle.TLabel", font=(FONT, 13, "bold"))
+        style.configure("Route.TLabel", foreground=MUTED, font=(FONT, 10))
         style.configure("PanelMuted.TLabel", background=PANEL, foreground=MUTED)
         style.configure("Error.TLabel", background=PANEL, foreground=ERROR)
-        style.configure("TEntry", fieldbackground=PANEL, insertcolor=TEXT, padding=(8, 6))
-        style.map("TEntry", fieldbackground=[("disabled", "#e9edf5")])
-        style.configure("TCombobox", fieldbackground=PANEL, background=PANEL, arrowcolor=MUTED, padding=(8, 6))
-        style.map("TCombobox", fieldbackground=[("disabled", "#e9edf5"), ("readonly", PANEL)])
+        style.configure("TEntry", fieldbackground="white", insertcolor=TEXT, padding=(8, 6))
+        style.map("TEntry", fieldbackground=[("disabled", "#eceee8")])
+        style.configure("TCombobox", fieldbackground="white", arrowcolor=MUTED, padding=(8, 6))
+        style.map("TCombobox", fieldbackground=[("disabled", "#eceee8"), ("readonly", "white")])
         self.root.option_add("*TCombobox*Listbox.font", "{" + FONT + "} 10")
-        self.root.option_add("*TCombobox*Listbox.selectBackground", "#dce6ff")
+        self.root.option_add("*TCombobox*Listbox.selectBackground", TINT)
         self.root.option_add("*TCombobox*Listbox.selectForeground", TEXT)
-        style.configure("TButton", background=PANEL, padding=(13, 6), relief="flat", borderwidth=1)
-        style.map("TButton", background=[("active", "#e9effc")])
+        style.configure("TButton", background=BACKGROUND, padding=(12, 6), relief="flat", borderwidth=0, width=0)
+        style.map("TButton", background=[("pressed", BORDER), ("active", TINT)])
+        style.configure("Toolbar.TButton", padding=(13, 6), background="#ffffff",
+                        relief="solid", borderwidth=1, bordercolor="#98a79b",
+                        lightcolor="#ffffff", darkcolor="#ffffff")
+        style.map("Toolbar.TButton", background=[("pressed", "#d0dfd2"), ("active", TINT)],
+                  bordercolor=[("active", ACCENT)], relief=[("pressed", "sunken")])
         style.configure("Primary.TButton", background=ACCENT, foreground=PANEL, padding=(22, 8),
                         bordercolor=ACCENT, lightcolor=ACCENT, darkcolor=ACCENT)
-        style.map("Primary.TButton", background=[("disabled", "#e9edf5"), ("active", "#2448b8")],
+        style.map("Primary.TButton", background=[("disabled", BORDER), ("active", "#194a37")],
                   foreground=[("disabled", MUTED)])
-        style.configure("TCheckbutton", background=BACKGROUND, indicatorbackground=PANEL)
-        style.map("TCheckbutton", indicatorbackground=[("disabled", "#e9edf5"), ("selected", "#dce6ff")],
-                  background=[("active", BACKGROUND)])
-        style.configure("TNotebook", borderwidth=0, tabmargins=0)
-        style.configure("TNotebook.Tab", padding=(16, 7))
-        style.map("TNotebook.Tab", background=[("selected", "#e2eaff"), ("active", "#ecf1fb")],
+        style.layout("Round.TCheckbutton", style.layout("TRadiobutton"))
+        style.configure("Round.TCheckbutton", padding=(2, 5), indicatorsize=15, indicatormargin=(0, 0, 8, 0),
+                        indicatorbackground="white", indicatorforeground=ACCENT,
+                        upperbordercolor=MUTED, lowerbordercolor=MUTED)
+        style.map("Round.TCheckbutton", background=[("active", TINT)],
+                  foreground=[("disabled", MUTED)], indicatorforeground=[("disabled", MUTED)])
+        style.layout("TNotebook", [("Notebook.client", {"sticky": "nswe"})])
+        style.layout("TNotebook.Tab", [("Notebook.padding", {"sticky": "nswe", "children": [
+            ("Notebook.focus", {"sticky": "nswe", "children": [("Notebook.label", {"sticky": "nswe"})]})
+        ]})])
+        style.configure("TNotebook", borderwidth=0, tabmargins=0, background=BACKGROUND,
+                        bordercolor=BACKGROUND, lightcolor=BACKGROUND, darkcolor=BACKGROUND)
+        style.configure("TNotebook.Tab", padding=(14, 7), background=BACKGROUND, foreground=MUTED)
+        style.map("TNotebook.Tab", background=[("selected", TINT), ("active", TINT)],
                   foreground=[("selected", ACCENT)])
 
-        page = ttk.Frame(self.root, padding=(22, 18))
+        page = ttk.Frame(self.root, padding=(30, 18))
         page.pack(fill="both", expand=True)
         page.columnconfigure(0, weight=1)
-        page.rowconfigure(1, weight=1)
+        page.rowconfigure(2, weight=1)
         header = ttk.Frame(page)
-        header.grid(row=0, sticky="ew", pady=(0, 16))
-        ttk.Label(header, text="VRChat 实时翻译", style="Title.TLabel").pack(side="left")
-        self.settings_button = ttk.Button(header, text="设置", command=self.open_settings)
+        header.grid(row=0, sticky="ew", pady=(0, 14))
+        mark = tk.Canvas(header, width=32, height=32, background=ACCENT, highlightthickness=0)
+        for x, height in ((7, 6), (13, 16), (19, 11), (25, 4)):
+            mark.create_line(x, 16 - height / 2, x, 16 + height / 2, fill="#ffffff", width=2, capstyle="round")
+        mark.pack(side="left", padx=(0, 10))
+        ttk.Label(header, text="VRC Transf", style="Title.TLabel").pack(side="left")
+        self.settings_button = ttk.Button(header, text="打开设置", command=self.open_settings,
+                                          style="Toolbar.TButton", cursor="hand2")
         self.settings_button.pack(side="right")
+        self.mini_button = ttk.Button(header, text="打开迷你字幕", command=self.open_mini,
+                                      style="Toolbar.TButton", cursor="hand2")
+        self.mini_button.pack(side="right", padx=(0, 8))
+        tk.Frame(page, height=1, background=BORDER).grid(row=1, sticky="ew")
 
         captions = ttk.Frame(page)
-        captions.grid(row=1, sticky="nsew")
-        captions.columnconfigure((0, 1), weight=1, uniform="captions")
+        captions.grid(row=2, sticky="nsew", pady=24)
+        captions.columnconfigure((0, 2), weight=1, uniform="captions")
         captions.rowconfigure(0, weight=1)
         self.panels = {
             "game": CaptionPanel(captions, "游戏字幕"),
             "mic": CaptionPanel(captions, "麦克风译文"),
         }
-        self.panels["game"].frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        self.panels["mic"].frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        self.panels["game"].frame.grid(row=0, column=0, sticky="nsew", padx=(0, 22))
+        tk.Frame(captions, width=1, background=BORDER).grid(row=0, column=1, sticky="ns")
+        self.panels["mic"].frame.grid(row=0, column=2, sticky="nsew", padx=(22, 0))
 
+        tk.Frame(page, height=1, background=BORDER).grid(row=3, sticky="ew")
         footer = ttk.Frame(page)
-        footer.grid(row=2, sticky="ew", pady=(14, 0))
+        footer.grid(row=4, sticky="ew", pady=(14, 0))
         footer.columnconfigure(0, weight=1)
         status = ttk.Label(footer, textvariable=self.notice, style="Muted.TLabel", wraplength=375)
         status.grid(row=0, column=0, sticky="ew", padx=(0, 12))
         status.bind("<Configure>", lambda event: status.configure(wraplength=event.width))
         self.start_button = ttk.Button(footer, text="开始翻译", command=self.toggle, style="Primary.TButton")
         self.start_button.grid(row=0, column=1, sticky="e")
+
+    def _build_mini(self):
+        window = self.mini_window = tk.Toplevel(self.root)
+        window.withdraw()
+        window.title("VRC Transf · 迷你字幕")
+        window.geometry("540x200")
+        window.minsize(360, 170)
+        window.attributes("-topmost", True)
+        window.configure(background=MINI_BG, padx=18, pady=10)
+        window.protocol("WM_DELETE_WINDOW", self.close_mini)
+        window.bind("<Escape>", lambda _: self.close_mini())
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(1, weight=1)
+        self.mini_direction = tk.Label(window, background=MINI_BG, foreground=MINI_MUTED, font=(FONT, 10))
+        self.mini_direction.grid(row=0, column=0, sticky="w")
+        back = tk.Button(window, text="返回双栏", command=self.close_mini, font=(FONT, 10),
+                         background=MINI_BG, foreground=MINI_MUTED, activebackground=ACCENT,
+                         activeforeground="white", relief="flat", borderwidth=0, padx=8, pady=4)
+        back.grid(row=0, column=1, sticky="e")
+        self.mini_output = tk.Text(window, wrap="word", height=2, width=1, background=MINI_BG,
+                                   foreground="#fafbf6", font=(FONT, 18, "bold"), spacing2=3,
+                                   borderwidth=0, highlightthickness=0, state="disabled")
+        self.mini_output.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(9, 0))
+        self.mini_output.tag_configure("previous", foreground=MINI_MUTED, font=(FONT, 11), spacing3=6)
+        self.mini_output.tag_configure("pending", foreground="#c7ead3")
+        self.mini_status = tk.Label(window, background=MINI_BG, foreground=MINI_MUTED,
+                                    anchor="w", justify="left", font=(FONT, 9))
+        self.mini_status.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.mini_status.bind("<Configure>", lambda event: self.mini_status.configure(wraplength=event.width))
+
+    def open_mini(self):
+        self.previous_main_state = self.root.state()
+        self.root.withdraw()
+        self.mini_window.deiconify()
+        self.mini_window.lift()
+        self._refresh_mini()
+
+    def close_mini(self):
+        self.dismissed_game = self.auto_game
+        self.auto_game = None
+        self.mini_window.withdraw()
+        self.root.state("zoomed" if self.previous_main_state == "zoomed" else "normal")
+        self.root.lift()
+        self.mini_button.focus_set()
+
+    def _watch_fullscreen(self):
+        try:
+            self._sync_fullscreen()
+        finally:
+            self.fullscreen_task = self.root.after(600, self._watch_fullscreen)
+
+    @staticmethod
+    def _show_in_background(window, state="normal"):
+        # A disabled Tk toplevel can be mapped on Windows without taking game input focus.
+        window.attributes("-disabled", True)
+        try:
+            window.state(state)
+            window.update_idletasks()
+        finally:
+            window.attributes("-disabled", False)
+
+    def _sync_fullscreen(self):
+        if sys.platform != "win32":
+            return
+        window = self.mini_window
+        if not self.auto_game and (window.state() != "withdrawn" or self.settings_window.state() != "withdrawn"):
+            return
+        hwnd = foreground_window()
+        if not hwnd:  # A foreground window can be briefly absent during Alt+Tab.
+            return
+        if self.auto_game and hwnd == int(window.wm_frame(), 16):
+            hwnd = self.auto_game
+        elif self.dismissed_game and hwnd == int(self.root.wm_frame(), 16):
+            hwnd = self.dismissed_game
+        screen = fullscreen_game_screen(hwnd) if self.follow_fullscreen.get() else None
+        if not screen:
+            self.dismissed_game = None
+            if self.auto_game:
+                self.auto_game = None
+                window.withdraw()
+                if self.previous_main_state != "iconic":
+                    self._show_in_background(self.root, self.previous_main_state)
+            return
+        if hwnd in (self.dismissed_game, self.auto_game):
+            return
+        self.dismissed_game = None
+        if not self.auto_game:
+            self.previous_main_state = self.root.state()
+            if self.previous_main_state != "iconic":
+                self.root.withdraw()
+        self.auto_game = hwnd
+        width = window.winfo_width() if window.winfo_width() > 1 else 540
+        height = window.winfo_height() if window.winfo_height() > 1 else 200
+        x = max(screen.left, (screen.left + screen.right - width) // 2)
+        y = max(screen.top, screen.bottom - height - 70)
+        window.geometry(f"+{x}+{y}")
+        self._refresh_mini()
+        self._show_in_background(window)
+
+    def _refresh_mini(self):
+        panel = self.panels["game"]
+        self.mini_direction.configure(text=panel.direction.cget("text"))
+        lines = list(panel.history)[-2:]
+        if panel.pending:
+            lines = lines[-1:] + [panel.pending]
+        self.mini_output.configure(state="normal")
+        self.mini_output.delete("1.0", "end")
+        if self.game_enabled.get() and lines:
+            if len(lines) == 2:
+                self.mini_output.insert("end", lines[0] + "\n", "previous")
+            self.mini_output.insert("end", lines[-1], "pending" if panel.pending else ())
+        else:
+            self.mini_output.insert("end", "等待游戏字幕" if self.game_enabled.get() else "游戏音频已关闭")
+        self.mini_output.configure(state="disabled")
+        self.mini_output.see("end")
+        self.mini_status.configure(text=panel.status.cget("text") or self.notice.get())
 
     def _build_settings(self):
         self.settings_window = tk.Toplevel(self.root)
@@ -189,17 +346,23 @@ class App:
         window.protocol("WM_DELETE_WINDOW", self.close_settings)
         window.bind("<Escape>", lambda _: self.close_settings())
 
-        page = ttk.Frame(window, padding=(20, 16))
+        page = ttk.Frame(window, padding=(25, 20))
         page.pack(fill="both", expand=True)
         ttk.Label(page, text="设置", style="DialogTitle.TLabel").pack(anchor="w", pady=(0, 10))
         tabs = ttk.Notebook(page)
         tabs.pack(fill="both", expand=True)
-        translation = ttk.Frame(tabs, padding=(10, 16))
-        audio = ttk.Frame(tabs, padding=(10, 14))
-        chatbox = ttk.Frame(tabs, padding=(10, 16))
+        translation = ttk.Frame(tabs, padding=(0, 20))
+        audio = ttk.Frame(tabs, padding=(0, 18))
+        chatbox = ttk.Frame(tabs, padding=(0, 20))
         tabs.add(translation, text="翻译")
         tabs.add(audio, text="音频")
         tabs.add(chatbox, text="Chatbox")
+        display = ttk.Frame(tabs, padding=(0, 20))
+        tabs.add(display, text="显示")
+        self._check(display, "VRChat 全屏时自动打开迷你字幕", self.follow_fullscreen,
+                    lock_during_session=False).pack(fill="x")
+        ttk.Label(display, text="离开游戏或退出全屏后，恢复原来的窗口状态。",
+                  style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
         for tab in (translation, audio):
             tab.columnconfigure(0, weight=1)
 
@@ -215,16 +378,20 @@ class App:
         credentials.columnconfigure((0, 1), weight=1, uniform="credentials")
         self.key_box = self._entry(credentials, "API Key", self.key, 0, secret=True)
         self.workspace_box = self._entry(credentials, "Workspace ID（仅百炼）", self.workspace, 1)
+        self.fast_turn_box = self._check(translation, "快速断句", self.fast_turns)
+        self.fast_turn_box.grid(row=2, sticky="w", pady=(8, 0))
+        ttk.Label(translation, text="适合轮流交谈。多人同时说话时可关闭，使用说话人分离。",
+                  style="Muted.TLabel", wraplength=475).grid(row=3, sticky="w")
         self.provider_hint = ttk.Label(translation, style="Muted.TLabel", wraplength=475)
-        self.provider_hint.grid(row=2, sticky="w", pady=(8, 0))
+        self.provider_hint.grid(row=4, sticky="w", pady=(8, 0))
 
-        self._check(audio, "翻译游戏音频", self.game_enabled).grid(row=0, sticky="w", pady=(0, 5))
+        self._check(audio, "翻译游戏音频", self.game_enabled).grid(row=0, sticky="ew", pady=(0, 5))
         game = ttk.Frame(audio)
         game.grid(row=1, sticky="ew")
         game.columnconfigure(0, weight=1)
         self.game_box = self._combo(game, "游戏音频", self.game_source, (), 0, 29)
         self._combo(game, "接收语言", self.game_language, tuple(LANGUAGES), 1, 14)
-        self._check(audio, "翻译麦克风", self.mic_enabled).grid(row=2, sticky="w", pady=(8, 5))
+        self._check(audio, "翻译麦克风", self.mic_enabled).grid(row=2, sticky="ew", pady=(8, 5))
         mic = ttk.Frame(audio)
         mic.grid(row=3, sticky="ew")
         mic.columnconfigure(0, weight=1)
@@ -234,7 +401,7 @@ class App:
         refresh.grid(row=4, sticky="w", pady=(9, 0))
         self.controls.append((refresh, "normal"))
 
-        self._check(chatbox, "麦克风译文发到 Chatbox", self.send_enabled).pack(anchor="w")
+        self._check(chatbox, "麦克风译文发到 Chatbox", self.send_enabled).pack(fill="x")
         ttk.Label(chatbox, text="发送麦克风定稿译文。请先在 VRChat 的 Options → OSC 中启用 OSC。",
                   style="Muted.TLabel", wraplength=475).pack(anchor="w", pady=(6, 14))
         ttk.Button(chatbox, text="测试 Chatbox", command=self.test_chatbox).pack(anchor="w")
@@ -268,11 +435,13 @@ class App:
             window.grab_release()
         window.withdraw()
         self.settings_button.focus_set()
+        self.sync_controls()
 
-    def _check(self, parent, text, variable):
-        widget = ttk.Checkbutton(parent, text=text, variable=variable)
-        self.controls.append((widget, "normal"))
-        return widget
+    def _check(self, parent, text, variable, *, lock_during_session=True):
+        switch = ttk.Checkbutton(parent, text=text, variable=variable, style="Round.TCheckbutton", takefocus=True)
+        if lock_during_session:
+            self.controls.append((switch, "normal"))
+        return switch
 
     def _combo(self, row, label, variable, values, column, width):
         ttk.Label(row, text=label, style="Muted.TLabel").grid(row=0, column=column, sticky="w", pady=(0, 4))
@@ -315,9 +484,15 @@ class App:
     def sync_controls(self):
         mode = self.backend.get()
         cloud = mode == QWEN
+        game, mic = self.panels["game"], self.panels["mic"]
+        game.direction.configure(text=f"游戏声音  →  {self.game_language.get()}")
+        mic.direction.configure(text=f"我的麦克风  →  {self.mic_language.get()}")
+        game.route.configure(text="游戏音频已关闭" if not self.game_enabled.get() else "桌面字幕")
+        mic_route = "定稿后发送至 Chatbox" if cloud and self.send_enabled.get() else "仅本机预览"
+        mic.route.configure(text=mic_route if self.mic_enabled.get() else "麦克风已关闭")
         workspace_needed = REGIONS[self.region.get()] != QIANWEN_CN
         for widget, state in self.controls:
-            settings_only = widget in (self.region_box, self.workspace_box, self.key_box)
+            settings_only = widget in (self.region_box, self.workspace_box, self.key_box, self.fast_turn_box)
             capture_only = widget in (self.game_box, self.mic_box)
             permitted = not self.active and (cloud or not (settings_only or capture_only))
             if widget is self.workspace_box and not workspace_needed:
@@ -371,7 +546,7 @@ class App:
         secret = self.key.get().strip()
         try:
             translator = DemoTranslator() if mode == DEMO else QwenTranslator(QwenSettings(
-                secret, self.workspace.get().strip(), REGIONS[self.region.get()],
+                secret, self.workspace.get().strip(), REGIONS[self.region.get()], fast_turns=self.fast_turns.get(),
             ))
             sources = self._sources(mode == DEMO)
         except (ValueError, OSError, RuntimeError, KeyError) as error:
@@ -385,7 +560,7 @@ class App:
             panel.pending = ""
             panel.history.clear()
             panel.render()
-            panel.set_status("正在启动" if role in self.active else "未启用")
+            panel.set_status("")
         self.sync_controls()
         for role, (target, source) in sources.items():
             Thread(target=self._run, args=(translator, role, target, source, secret), daemon=True).start()
@@ -407,42 +582,55 @@ class App:
         self.settings_notice.set("测试文字已排队，请查看 VRChat Chatbox")
 
     def poll(self):
+        received = False
         try:
             for _ in range(64):
                 role, item = self.events.get_nowait()
+                received = True
                 panel = self.panels[role]
                 if isinstance(item, TranslationEvent):
                     if item.kind == "ready":
-                        panel.set_status("正在翻译")
                         self.notice.set("正在翻译")
                     else:
                         panel.update_text(item)
                         if role == "mic" and item.kind == "final" and self.publish:
-                            self.chatbox.enqueue(item.text)
+                            self.chatbox.enqueue(item.text, mergeable=True)
                 elif item:
                     panel.set_status(item, error=True)
-                    self.notice.set(item)
+                    self.notice.set("翻译遇到问题，请查看对应声道")
                 else:
                     self.active.discard(role)
+                    if role == "mic":
+                        self.chatbox.finish_session()
                     panel.pending = ""
                     panel.render()
-                    if panel.status.cget("style") != "Error.TLabel":
-                        panel.set_status("已停止")
+                    if self.active and panel.status.cget("style") != "Error.TLabel":
+                        panel.set_status("该路已停止")
                     if not self.active:
                         self.sync_controls()
-                        if self.notice.get() in ("正在翻译", "正在停止采集并接收剩余译文…"):
-                            self.notice.set("已停止")
+                        errors = any(p.status.cget("style") == "Error.TLabel" for p in self.panels.values())
+                        for finished in self.panels.values():
+                            if finished.status.cget("style") != "Error.TLabel":
+                                finished.set_status("")
+                        if errors:
+                            self.notice.set("翻译已结束，请查看声道提示")
+                        elif self.notice.get() in ("正在翻译", "正在停止采集并接收剩余译文…", "正在运行演示。", "正在连接翻译 API…"):
+                            self.notice.set("演示结束" if self.backend.get() == DEMO else "已停止")
         except Empty:
             pass
         try:
             self.chatbox.tick()
         except (OSError, ValueError) as error:
             self.notice.set(f"Chatbox 发送失败（{error}）")
+            received = True
+        if received and self.mini_window.winfo_viewable():
+            self._refresh_mini()
         self.poll_task = self.root.after(40, self.poll)
 
     def close(self):
         self.stop.set()
         self.root.after_cancel(self.poll_task)
+        self.root.after_cancel(self.fullscreen_task)
         self.chatbox.close()
         self.root.destroy()
 
