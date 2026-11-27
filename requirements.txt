@@ -1,0 +1,5 @@
+PyAudioWPatch==0.2.12.9
+capturekit==0.1.0
+numpy>=2.4,<3
+soxr>=1,<2
+websockets>=15,<17
