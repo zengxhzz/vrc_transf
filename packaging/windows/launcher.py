@@ -1,7 +1,7 @@
 import sys
 
 
-def check_install():
+def check_install(*, interactive_desktop):
     """Exercise the installed GUI and its native libraries without external services."""
     import ssl
     import time
@@ -35,7 +35,9 @@ def check_install():
             raise RuntimeError("Demo did not produce both captions")
         app.open_mini()
         root.update()
-        if not app.mini_window.winfo_viewable():
+        if app.panels["game"].history[-1] not in app.mini_output.get("1.0", "end"):
+            raise RuntimeError("Mini window did not show the game caption")
+        if interactive_desktop and not app.mini_window.winfo_viewable():
             raise RuntimeError("Mini window did not open")
         app.close_mini()
     finally:
@@ -43,13 +45,13 @@ def check_install():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--self-test":
+    if len(sys.argv) == 3 and sys.argv[1] in ("--self-test", "--self-test-headless"):
         import traceback
         from pathlib import Path
 
         report = Path(sys.argv[2])
         try:
-            check_install()
+            check_install(interactive_desktop=sys.argv[1] == "--self-test")
         except Exception:
             report.write_text(traceback.format_exc(), encoding="utf-8")
             sys.exit(1)

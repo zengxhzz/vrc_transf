@@ -26,6 +26,7 @@ setup(
         "build_exe": {
             "include_msvcr": True,
             "include_files": licenses,
+            "replace_paths": [("*", "")],
             "includes": ["capturekit._backends.windows.api", "pyaudiowpatch"],
             "excludes": ["unittest", "test", "setuptools", "pip"],
         },

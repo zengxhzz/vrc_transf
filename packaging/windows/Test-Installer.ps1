@@ -33,7 +33,8 @@ try {
         [Environment]::SetEnvironmentVariable($name, $null, 'Process')
     }
     $report = Join-Path $work.FullName 'smoke.txt'
-    $app = Start-Process -FilePath $exe -ArgumentList "--self-test `"$report`"" -WorkingDirectory $work.FullName -PassThru -WindowStyle Hidden
+    $mode = if ($RequireCleanImage) { '--self-test-headless' } else { '--self-test' }
+    $app = Start-Process -FilePath $exe -ArgumentList "$mode `"$report`"" -WorkingDirectory $work.FullName -PassThru -WindowStyle Hidden
     if (!$app.WaitForExit(60000)) { $app.Kill(); $app.WaitForExit(); throw 'Installed application timed out' }
     $result = if (Test-Path -LiteralPath $report) { Get-Content -Raw -LiteralPath $report } else { 'No report produced' }
     if ($app.ExitCode -ne 0 -or $result -ne 'PASS') { throw "Application exited with $($app.ExitCode): $result" }
