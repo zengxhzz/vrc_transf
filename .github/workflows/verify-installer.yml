@@ -1,0 +1,47 @@
+name: Verify Windows installer
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: GitHub release asset ID of the candidate MSI
+        required: true
+      sha256:
+        description: SHA-256 of the candidate MSI
+        required: true
+
+# GitHub requires push access to download a draft release.
+permissions:
+  contents: write
+jobs:
+  clean-install:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download and verify the exact release candidate
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET_ID: ${{ inputs.asset_id }}
+          SHA256: ${{ inputs.sha256 }}
+        run: |
+          if ($env:ASSET_ID -notmatch '^\d+$' -or $env:SHA256 -notmatch '^[a-fA-F0-9]{64}$') { throw 'Invalid asset or digest' }
+          $dir = New-Item -ItemType Directory -Path "$env:RUNNER_TEMP\vrc-candidate"
+          $file = Join-Path $dir 'setup.msi'
+          $uri = "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/releases/assets/$env:ASSET_ID"
+          Invoke-WebRequest $uri -Headers @{Authorization="Bearer $env:GH_TOKEN"; Accept='application/octet-stream'} -OutFile $file
+          if ((Get-FileHash $file).Hash -ne $env:SHA256) { throw 'MSI checksum mismatch' }
+          Copy-Item packaging/windows/Test-Installer.ps1 $dir
+      - name: Test the installed desktop app on a fresh Windows runner
+        shell: pwsh
+        run: ./packaging/windows/Test-Installer.ps1 -Installer "$env:RUNNER_TEMP\vrc-candidate\setup.msi"
+      - name: Install and run offline in a clean Windows image
+        shell: pwsh
+        run: |
+          $image = 'mcr.microsoft.com/windows/server:ltsc2022'
+          docker pull $image
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          docker run --rm --isolation process --network none --mount "type=bind,source=$env:RUNNER_TEMP\vrc-candidate,target=C:\candidate,readonly" $image powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\candidate\Test-Installer.ps1 -Installer C:\candidate\setup.msi -RequireCleanImage
+          exit $LASTEXITCODE

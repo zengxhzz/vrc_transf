@@ -2,7 +2,13 @@
 
 Windows 版 VRChat 实时翻译工具。游戏音频的译文显示在桌面窗口，麦克风译文可以通过 OSC 发到 VRChat Chatbox。
 
-## 启动
+## Windows 安装包
+
+打开 [GitHub Releases](https://github.com/zengxhzz/vrc_transf/releases/latest)，在 **Assets** 中下载名称以 `windows-x64.msi` 结尾的文件。双击安装后，从开始菜单打开 **VRC Transf**。安装包自带 Python、图形界面和音频运行库，安装和演示均可离线完成。
+
+首次体验可在 **设置 → 翻译** 选择 **演示（无需 Key）**，点 **完成** 后运行演示。使用实时翻译时需要联网并填写自己的 API Key。卸载可通过 Windows 的 **设置 → 应用** 完成。
+
+## 从源码启动
 
 需要 Windows x64 和 64 位 Python 3.12 至 3.14。按进程采集需要 Windows 构建号 20348 或更高，例如 Windows 11。构建号更低时，游戏音频使用界面中选定的播放设备。
 
@@ -35,6 +41,13 @@ Chatbox 使用 `127.0.0.1:9000`，只发送已定稿的麦克风译文。发送�
 - [VRChat Chatbox OSC 文档](https://docs.vrchat.com/docs/osc-as-input-controller#chatbox)
 
 ## 开发验证
+
+要重新构建 Windows x64 安装包，使用 64 位 Python 3.13 创建并激活虚拟环境，在仓库根目录执行以下命令。生成的 MSI 位于 `dist` 目录。
+
+```powershell
+python -m pip install -r requirements.txt cx-Freeze==8.7.4
+python setup.py bdist_msi
+```
 
 在项目目录运行：
 
